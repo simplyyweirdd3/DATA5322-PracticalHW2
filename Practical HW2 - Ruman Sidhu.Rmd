@@ -513,6 +513,7 @@ To visualize how the best-performing model separates classes, I plot the SVM dec
 ```{r decision-boundary, fig.width=10, fig.height=8}
 # Fit a 2D radial SVM on just AGE and BMICALC for visualization
 set.seed(42)
+# Fit 2D SVM for visualization
 svm_2d <- svm(
   heart_disease ~ AGE + BMICALC,
   data          = train_set,
@@ -523,40 +524,30 @@ svm_2d <- svm(
 )
 
 # Create prediction grid
-age_range <- seq(min(train_set$AGE, na.rm = TRUE),
-                 max(train_set$AGE, na.rm = TRUE), length.out = 150)
-bmi_range <- seq(min(train_set$BMICALC, na.rm = TRUE),
-                 max(train_set$BMICALC, na.rm = TRUE), length.out = 150)
-
+age_range <- seq(min(train_set$AGE), max(train_set$AGE), length.out = 150)
+bmi_range <- seq(min(train_set$BMICALC), max(train_set$BMICALC), length.out = 150)
 grid_2d <- expand.grid(AGE = age_range, BMICALC = bmi_range)
 grid_2d$pred <- predict(svm_2d, grid_2d)
+plot_sample <- train_set[sample(nrow(train_set), 500), ]
+sv_data_plot <- train_set[svm_2d$index, ][sample(length(svm_2d$index), min(80, length(svm_2d$index))), ]
 
-# Get support vectors
-sv_idx <- svm_2d$index
-sv_data <- train_set[sv_idx, ]
-
-# Plot
 ggplot() +
   geom_tile(data = grid_2d,
             aes(x = AGE, y = BMICALC, fill = pred),
-            alpha = 0.4) +
-  geom_point(data = train_set,
+            alpha = 0.35) +
+  geom_point(data = plot_sample,
              aes(x = AGE, y = BMICALC, color = heart_disease),
-             size = 1.2, alpha = 0.55) +
-  geom_point(data = sv_data,
+             size = 1.5, alpha = 0.3) +
+  geom_point(data = sv_data_plot,
              aes(x = AGE, y = BMICALC),
-             shape = 1, size = 3.5, color = "#ffcc00", stroke = 1.3,
-             alpha = 0.8) +
-  scale_fill_manual(values  = c("No" = "#d0e8ff", "Yes" = "#ffd6dc"),
-                    name = "Predicted") +
-  scale_color_manual(values = c("No" = COL_NO, "Yes" = COL_YES),
-                     name = "Actual") +
+             shape = 1, size = 4, color = "#ffcc00", stroke = 1.5) +
+  scale_fill_manual(values = c("No" = "#d0e8ff", "Yes" = "#ffd6dc"), name = "Predicted") +
+  scale_color_manual(values = c("No" = "#0F3460", "Yes" = "#E94560"), name = "Actual") +
   labs(
     title    = "SVM Decision Boundary: Age vs BMI",
     subtitle = "Radial kernel  |  Gold circles = support vectors",
-    x        = "Age (years)",
-    y        = "Body Mass Index (BMI)",
-    caption  = "Note: boundary shown for 2 predictors only; full model uses 8 predictors"
+    x = "Age (years)", y = "Body Mass Index (BMI)",
+    caption = "Note: 500 points sampled for readability; full model uses 8 predictors"
   )
 ```
 
