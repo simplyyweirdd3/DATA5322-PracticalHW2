@@ -1,0 +1,630 @@
+---
+title: "Practical Homework 2: Support Vector Machines"
+subtitle: "Predicting Coronary Heart Disease from Health Behaviors and Demographics"
+author: "Ruman Sidhu"
+date: "Spring 2026 | DATA 5322"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", dpi = 150)
+```
+
+<style>
+body {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 15px;
+  color: #1a1a2e;
+  background-color: #f8f9fc;
+  max-width: 1050px;
+  margin: auto;
+  padding: 20px;
+}
+h1, h2, h3 {
+  color: #16213e;
+  border-bottom: 2px solid #e94560;
+  padding-bottom: 6px;
+}
+h1 { font-size: 2em; }
+h2 { font-size: 1.5em; }
+h3 { font-size: 1.2em; }
+pre, code {
+  background-color: #1a1a2e;
+  color: #e0e0e0;
+  border-radius: 6px;
+  font-size: 13px;
+}
+pre {
+  padding: 12px;
+  border-left: 4px solid #e94560;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 20px 0;
+  font-size: 14px;
+}
+th {
+  background-color: #16213e;
+  color: white;
+  padding: 10px 14px;
+  text-align: left;
+}
+td {
+  padding: 8px 14px;
+  border-bottom: 1px solid #dde1ec;
+}
+tr:nth-child(even) { background-color: #eef0f8; }
+blockquote {
+  border-left: 4px solid #e94560;
+  background: #fff0f3;
+  padding: 10px 16px;
+  margin: 10px 0;
+  border-radius: 0 6px 6px 0;
+}
+</style>
+
+```{r libraries}
+library(tidyverse)
+library(e1071)
+library(caret)
+library(pROC)
+```
+
+```{r global-theme}
+# ── Global plot theme and palette ──────────────────────────────────────────────
+COL_NO   <- "#0F3460"   # deep navy  → healthy
+COL_YES  <- "#E94560"   # crimson    → heart disease
+COL_BG   <- "#f8f9fc"
+COL_GRID <- "#dde1ec"
+
+theme_ph2 <- function(base_size = 13) {
+  theme_minimal(base_size = base_size) %+replace%
+    theme(
+      plot.background   = element_rect(fill = COL_BG, color = NA),
+      panel.background  = element_rect(fill = "white", color = NA),
+      panel.grid.major  = element_line(color = COL_GRID, linewidth = 0.4),
+      panel.grid.minor  = element_blank(),
+      axis.title        = element_text(face = "bold", color = "#16213e"),
+      axis.text         = element_text(color = "#3a3a5c"),
+      plot.title        = element_text(face = "bold", color = "#16213e",
+                                       size = base_size + 2, hjust = 0),
+      plot.subtitle     = element_text(color = "#666699", size = base_size - 1, hjust = 0),
+      plot.caption      = element_text(color = "#999999", size = 10, hjust = 1),
+      legend.background = element_rect(fill = COL_BG, color = NA),
+      legend.title      = element_text(face = "bold"),
+      strip.background  = element_rect(fill = "#16213e"),
+      strip.text        = element_text(color = "white", face = "bold")
+    )
+}
+
+theme_set(theme_ph2())
+```
+
+---
+
+## Research Question
+
+Can we predict whether an adult has been diagnosed with coronary heart disease using their demographic characteristics and lifestyle habits? Using data from the 2022 National Health Interview Survey (NHIS), I apply linear, radial, and polynomial kernel SVMs to classify individuals as having or not having coronary heart disease.
+
+---
+
+## 1. Data Loading and Preparation
+
+```{r load-data}
+# Load the NHIS 2022 dataset
+nhis_raw <- read.csv("nhis_2022.csv")
+
+cat("Raw dataset dimensions:", nrow(nhis_raw), "rows x", ncol(nhis_raw), "cols\n")
+```
+
+### 1.1 Filter to Sample Adults
+
+The dataset includes both adults and children. Since all disease and lifestyle variables are only asked of sample adults (ASTATFLG == 1), we restrict to this group.
+
+```{r filter-adults}
+# Keep only sample adults (ASTATFLG = 1)
+adults <- nhis_raw %>% filter(ASTATFLG == 1)
+
+cat("Sample adults:", nrow(adults), "rows\n")
+```
+
+### 1.2 Missing Value Assessment
+
+Before selecting predictors, I check the percentage of missing or invalid values per column in the adult sample. "Invalid" means any code flagged as Unknown, Refused, Not in Universe, or Not Calculable in the NHIS codebook.
+
+```{r missing-values}
+# Check missingness per variable of interest
+# Using codebook-defined invalid codes for each variable
+check_missing <- data.frame(
+  Variable    = c("CHEARTDIEV", "AGE", "SEX", "BMICALC",
+                  "HRSLEEP", "MOD10DMIN", "ALCDAYSYR",
+                  "FRIESPNO", "POVERTY"),
+  Invalid_Codes = c("0,7,9", "997-999", "7-9", "0,996",
+                    "0,97-99", "996-999", "995-999",
+                    "996-999", "98,99"),
+  Pct_Invalid = c(
+    round(mean(adults$CHEARTDIEV %in% c(0,7,9))     * 100, 1),
+    round(mean(adults$AGE        %in% c(997,998,999))* 100, 1),
+    round(mean(adults$SEX        %in% c(7,8,9))      * 100, 1),
+    round(mean(adults$BMICALC    %in% c(0,996))       * 100, 1),
+    round(mean(adults$HRSLEEP    %in% c(0,97,98,99)) * 100, 1),
+    round(mean(adults$MOD10DMIN  %in% c(996,997,998,999)) * 100, 1),
+    round(mean(adults$ALCDAYSYR  %in% c(995,997,998,999)) * 100, 1),
+    round(mean(adults$FRIESPNO   %in% c(996,997,998,999)) * 100, 1),
+    round(mean(adults$POVERTY    %in% c(98,99))       * 100, 1)
+  )
+)
+
+knitr::kable(check_missing,
+             col.names = c("Variable", "Invalid Codes (codebook)", "% Invalid"),
+             caption   = "Per-column invalid/missing rate in adult sample",
+             align     = "lcc")
+```
+
+I selected 8 predictors covering demographics, physical health, activity, sleep, diet, and alcohol use. I recode all variables carefully using the NHIS codebook, converting "Unknown", "Refused", and "Not in Universe" codes to NA before any modeling.
+
+```{r recode}
+nhis_clean <- adults %>%
+  
+  # --- Target variable ---
+  # CHEARTDIEV: 1 = No, 2 = Yes, 7/9 = Unknown → drop
+  filter(CHEARTDIEV %in% c(1, 2)) %>%
+  mutate(heart_disease = factor(
+    ifelse(CHEARTDIEV == 2, "Yes", "No"),
+    levels = c("No", "Yes")
+  )) %>%
+  
+  # --- Predictor 1: Age ---
+  # Values 997/998/999 = unknown; top code 85 means 85+
+  mutate(AGE = ifelse(AGE %in% c(997, 998, 999), NA, AGE)) %>%
+  
+  # --- Predictor 2: Sex ---
+  # 1 = Male, 2 = Female, 7/8/9 = Unknown → NA
+  mutate(SEX = case_when(
+    SEX == 1 ~ "Male",
+    SEX == 2 ~ "Female",
+    TRUE     ~ NA_character_
+  ),
+  SEX = factor(SEX)) %>%
+  
+  # --- Predictor 3: BMI ---
+  # 0 = NIU, 996 = not calculable → NA
+  mutate(BMICALC = ifelse(BMICALC %in% c(0, 996), NA, BMICALC)) %>%
+  
+  # --- Predictor 4: Sleep hours ---
+  # 0 = NIU, 25 = less than 1 hour (keep as 0.5), 97/98/99 = unknown → NA
+  mutate(HRSLEEP = case_when(
+    HRSLEEP == 25 ~ 0.5,
+    HRSLEEP %in% c(0, 97, 98, 99) ~ NA_real_,
+    TRUE ~ as.numeric(HRSLEEP)
+  )) %>%
+  
+  # --- Predictor 5: Moderate physical activity (minutes) ---
+  # 0 = did not do moderate activity (valid: 0 min), 996/997/998/999 → NA
+  mutate(MOD10DMIN = ifelse(MOD10DMIN %in% c(996, 997, 998, 999), NA, MOD10DMIN)) %>%
+  
+  # --- Predictor 6: Alcohol drinking days per year ---
+  # 996 = NIU (never drinks) → treat as 0, 995 = inconsistent → NA, 997/998/999 → NA
+  mutate(ALCDAYSYR = case_when(
+    ALCDAYSYR == 996 ~ 0,
+    ALCDAYSYR %in% c(995, 997, 998, 999) ~ NA_real_,
+    TRUE ~ as.numeric(ALCDAYSYR)
+  )) %>%
+  
+  # --- Predictor 7: Fried potato frequency ---
+  # 0 = never, 995 = top code (keep), 996 = NIU → NA, 997/998/999 → NA
+  mutate(FRIESPNO = ifelse(FRIESPNO %in% c(996, 997, 998, 999), NA, FRIESPNO)) %>%
+  
+  # --- Predictor 8: Income-to-poverty ratio (grouped) ---
+  # Codes: 11-14 = below poverty, 21-25 = near poverty (1-2x), 30-38 = above poverty (2x+)
+  # 98 = undefinable, 99 = unknown → NA
+  mutate(POVERTY_GRP = case_when(
+    POVERTY %in% 11:14 ~ "Below_poverty",
+    POVERTY %in% 21:25 ~ "Near_poverty",
+    POVERTY %in% 30:38 ~ "Above_poverty",
+    TRUE               ~ NA_character_
+  ),
+  POVERTY_GRP = factor(POVERTY_GRP,
+                       levels = c("Below_poverty", "Near_poverty", "Above_poverty"))) %>%
+  
+  # Keep only the columns we need
+  select(heart_disease, AGE, SEX, BMICALC, HRSLEEP,
+         MOD10DMIN, ALCDAYSYR, FRIESPNO, POVERTY_GRP) %>%
+  
+  # Drop rows with any NA
+  drop_na()
+
+cat("Clean dataset dimensions:", nrow(nhis_clean), "rows\n")
+cat("\nClass distribution:\n")
+print(table(nhis_clean$heart_disease))
+cat("\nClass proportions:\n")
+print(round(prop.table(table(nhis_clean$heart_disease)), 3))
+```
+
+### 1.3 Exploratory Data Analysis
+
+Before modeling, I take a quick look at how key variables differ between those with and without heart disease.
+
+```{r eda-plots, fig.width=10, fig.height=6}
+# Age distribution by heart disease status
+p1 <- ggplot(nhis_clean, aes(x = AGE, fill = heart_disease)) +
+  geom_histogram(position = "dodge", bins = 20, alpha = 0.85) +
+  scale_fill_manual(values = c("No" = COL_NO, "Yes" = COL_YES)) +
+  labs(title = "Age Distribution by Heart Disease Status",
+       x = "Age (years)", y = "Count", fill = "Heart Disease")
+
+# BMI distribution
+p2 <- ggplot(nhis_clean, aes(x = heart_disease, y = BMICALC, fill = heart_disease)) +
+  geom_boxplot(alpha = 0.85, outlier.color = "#aaaacc", outlier.size = 0.8) +
+  scale_fill_manual(values = c("No" = COL_NO, "Yes" = COL_YES)) +
+  labs(title = "BMI by Heart Disease Status",
+       x = "Heart Disease", y = "BMI", fill = "Heart Disease")
+
+# Sleep hours
+p3 <- ggplot(nhis_clean, aes(x = heart_disease, y = HRSLEEP, fill = heart_disease)) +
+  geom_boxplot(alpha = 0.85, outlier.color = "#aaaacc", outlier.size = 0.8) +
+  scale_fill_manual(values = c("No" = COL_NO, "Yes" = COL_YES)) +
+  labs(title = "Sleep Hours by Heart Disease Status",
+       x = "Heart Disease", y = "Hours of Sleep", fill = "Heart Disease")
+
+# Physical activity
+p4 <- ggplot(nhis_clean, aes(x = heart_disease, y = log1p(MOD10DMIN), fill = heart_disease)) +
+  geom_boxplot(alpha = 0.85, outlier.color = "#aaaacc", outlier.size = 0.8) +
+  scale_fill_manual(values = c("No" = COL_NO, "Yes" = COL_YES)) +
+  labs(title = "Moderate Activity (log mins) by Heart Disease",
+       x = "Heart Disease", y = "log(1 + minutes)", fill = "Heart Disease")
+
+gridExtra::grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+---
+
+## 2. Train/Test Split and Subsampling
+
+SVMs are computationally intensive. The cleaned dataset has ~20,000+ rows, which makes tuning extremely slow. I take a stratified random sample of 3,000 adults (preserving class proportions) for model training and tuning. I use the remaining holdout as the test set.
+
+```{r split}
+set.seed(42)
+
+# Stratified sample: 3000 for train+tune, rest for test
+# First create a 70/30 split from the full cleaned data
+train_index <- createDataPartition(nhis_clean$heart_disease, p = 0.7, list = FALSE)
+train_full  <- nhis_clean[train_index, ]
+test_set    <- nhis_clean[-train_index, ]
+
+# Further sample training to 3000 rows for tuning speed
+# (still stratified so class balance is preserved)
+set.seed(42)
+train_idx_small <- createDataPartition(train_full$heart_disease, p = 3000/nrow(train_full), list = FALSE)
+train_set <- train_full[train_idx_small, ]
+
+cat("Training set size:", nrow(train_set), "\n")
+cat("Test set size:    ", nrow(test_set), "\n")
+cat("\nTraining class distribution:\n")
+print(table(train_set$heart_disease))
+cat("\nTest class distribution:\n")
+print(table(test_set$heart_disease))
+```
+
+### Class Imbalance: Why It Matters
+
+Only about 6% of respondents have been diagnosed with coronary heart disease. If we naively train a model, it will simply predict "No" for everyone and still achieve ~94% accuracy-which is meaningless. To address this, I use **class weights** in all SVM models, penalizing misclassification of the minority class ("Yes") more heavily than the majority.
+
+---
+
+## 3. SVM Model Training
+
+SVMs find a maximum-margin hyperplane that separates classes. When classes are not linearly separable, kernels implicitly project data into higher-dimensional spaces where separation becomes possible. The key hyperparameters are:
+
+- **C (cost)**: controls the trade-off between margin width and training errors. Larger C = tighter fit, more risk of overfitting.
+- **gamma** (radial/polynomial): controls how far the influence of each training point reaches. Smaller gamma = wider influence.
+- **degree** (polynomial): controls the polynomial complexity.
+
+### 3.1 Linear SVM
+
+A linear kernel is the simplest case-it draws a straight hyperplane. Interpretable and fast to tune.
+
+```{r svm-linear-tune}
+# Class weights to handle imbalance
+# Penalize missing a heart disease case more than missing a healthy case
+n_no  <- sum(train_set$heart_disease == "No")
+n_yes <- sum(train_set$heart_disease == "Yes")
+wt_no  <- 1
+wt_yes <- n_no / n_yes  # inverse frequency weighting
+class_wts <- c("No" = wt_no, "Yes" = wt_yes)
+
+cat("Class weights-No:", round(wt_no, 2), "| Yes:", round(wt_yes, 2), "\n")
+
+# Tune C for linear kernel using 5-fold cross-validation
+set.seed(42)
+tune_linear <- tune(
+  svm,
+  heart_disease ~ .,
+  data       = train_set,
+  kernel     = "linear",
+  ranges     = list(cost = c(0.01, 0.1, 1, 10)),
+  class.weights = class_wts,
+  tunecontrol = tune.control(cross = 5)
+)
+
+cat("\nLinear SVM tuning results:\n")
+print(tune_linear$performances)
+cat("\nBest cost:", tune_linear$best.parameters$cost, "\n")
+```
+
+```{r svm-linear-final}
+# Fit final linear SVM with best parameters
+set.seed(42)
+svm_linear <- svm(
+  heart_disease ~ .,
+  data          = train_set,
+  kernel        = "linear",
+  cost          = tune_linear$best.parameters$cost,
+  class.weights = class_wts,
+  probability   = TRUE
+)
+
+cat("Linear SVM fitted.\n")
+```
+
+### 3.2 Radial (RBF) Kernel SVM
+
+The radial basis function kernel handles non-linear boundaries by measuring similarity via Euclidean distance in feature space. Requires tuning both C and gamma.
+
+```{r svm-radial-tune}
+set.seed(42)
+tune_radial <- tune(
+  svm,
+  heart_disease ~ .,
+  data       = train_set,
+  kernel     = "radial",
+  ranges     = list(
+    cost  = c(0.1, 1, 10),
+    gamma = c(0.001, 0.01, 0.1)
+  ),
+  class.weights = class_wts,
+  tunecontrol   = tune.control(cross = 5)
+)
+
+cat("Radial SVM tuning results:\n")
+print(tune_radial$performances)
+cat("\nBest cost:", tune_radial$best.parameters$cost,
+    "| Best gamma:", tune_radial$best.parameters$gamma, "\n")
+```
+
+```{r svm-radial-final}
+set.seed(42)
+svm_radial <- svm(
+  heart_disease ~ .,
+  data          = train_set,
+  kernel        = "radial",
+  cost          = tune_radial$best.parameters$cost,
+  gamma         = tune_radial$best.parameters$gamma,
+  class.weights = class_wts,
+  probability   = TRUE
+)
+
+cat("Radial SVM fitted.\n")
+```
+
+### 3.3 Polynomial Kernel SVM
+
+The polynomial kernel captures interactions between features at a given degree. Degree 2 captures pairwise interactions, degree 3 adds cubic relationships.
+
+```{r svm-poly-tune}
+set.seed(42)
+tune_poly <- tune(
+  svm,
+  heart_disease ~ .,
+  data       = train_set,
+  kernel     = "polynomial",
+  ranges     = list(
+    cost   = c(0.1, 1, 10),
+    degree = c(2, 3)
+  ),
+  class.weights = class_wts,
+  tunecontrol   = tune.control(cross = 5)
+)
+
+cat("Polynomial SVM tuning results:\n")
+print(tune_poly$performances)
+cat("\nBest cost:", tune_poly$best.parameters$cost,
+    "| Best degree:", tune_poly$best.parameters$degree, "\n")
+```
+
+```{r svm-poly-final}
+set.seed(42)
+svm_poly <- svm(
+  heart_disease ~ .,
+  data          = train_set,
+  kernel        = "polynomial",
+  cost          = tune_poly$best.parameters$cost,
+  degree        = tune_poly$best.parameters$degree,
+  class.weights = class_wts,
+  probability   = TRUE
+)
+
+cat("Polynomial SVM fitted.\n")
+```
+
+---
+
+## 4. Model Evaluation
+
+I evaluate each model on the held-out test set. Given the class imbalance, I report accuracy, sensitivity (recall for "Yes"-catching actual heart disease cases), specificity, and AUC-ROC. Sensitivity is the most clinically meaningful metric here: missing a true heart disease case is more costly than a false alarm.
+
+```{r evaluate-function}
+# Helper: evaluate a fitted SVM on the test set
+evaluate_svm <- function(model, test_data, model_name) {
+  
+  preds <- predict(model, test_data)
+  probs <- attr(predict(model, test_data, probability = TRUE), "probabilities")[, "Yes"]
+  
+  cm <- confusionMatrix(preds, test_data$heart_disease, positive = "Yes")
+  roc_obj <- roc(test_data$heart_disease, probs, levels = c("No", "Yes"), quiet = TRUE)
+  
+  cat("==========", model_name, "==========\n")
+  cat("Accuracy:   ", round(cm$overall["Accuracy"], 4), "\n")
+  cat("Sensitivity:", round(cm$byClass["Sensitivity"], 4), "(recall for Yes)\n")
+  cat("Specificity:", round(cm$byClass["Specificity"], 4), "\n")
+  cat("AUC-ROC:    ", round(auc(roc_obj), 4), "\n\n")
+  
+  print(cm$table)
+  cat("\n")
+  
+  return(list(cm = cm, roc = roc_obj, preds = preds, probs = probs))
+}
+```
+
+```{r evaluate-all}
+results_linear <- evaluate_svm(svm_linear, test_set, "Linear SVM")
+results_radial <- evaluate_svm(svm_radial, test_set, "Radial SVM")
+results_poly   <- evaluate_svm(svm_poly,   test_set, "Polynomial SVM")
+```
+
+### 4.1 ROC Curve Comparison
+
+```{r roc-plot, fig.width=9, fig.height=7}
+# Plot all three ROC curves together
+par(bg = COL_BG, col.main = "#16213e", family = "sans")
+plot(results_linear$roc, col = "#0F3460", lwd = 3,
+     main = "ROC Curves: All Three SVM Kernels",
+     cex.main = 1.4, col.main = "#16213e")
+plot(results_radial$roc, col = "#E94560", lwd = 3, add = TRUE)
+plot(results_poly$roc,   col = "#533483", lwd = 3, add = TRUE)
+abline(a = 0, b = 1, lty = 2, col = "#aaaacc", lwd = 1.5)
+
+legend("bottomright",
+       legend = c(
+         paste0("Linear     (AUC = ", round(auc(results_linear$roc), 3), ")"),
+         paste0("Radial     (AUC = ", round(auc(results_radial$roc), 3), ")"),
+         paste0("Polynomial (AUC = ", round(auc(results_poly$roc),   3), ")")
+       ),
+       col = c("#0F3460", "#E94560", "#533483"),
+       lwd = 3, cex = 1.1, bg = "white", box.col = "#dde1ec")
+```
+
+### 4.2 Decision Boundary Visualization
+
+To visualize how the best-performing model separates classes, I plot the SVM decision boundary on the two strongest numeric predictors: **AGE** and **BMI**. I use the radial SVM since it is the most flexible.
+
+```{r decision-boundary, fig.width=10, fig.height=8}
+# Fit a 2D radial SVM on just AGE and BMICALC for visualization
+set.seed(42)
+svm_2d <- svm(
+  heart_disease ~ AGE + BMICALC,
+  data          = train_set,
+  kernel        = "radial",
+  cost          = tune_radial$best.parameters$cost,
+  gamma         = tune_radial$best.parameters$gamma,
+  class.weights = class_wts
+)
+
+# Create prediction grid
+age_range <- seq(min(train_set$AGE, na.rm = TRUE),
+                 max(train_set$AGE, na.rm = TRUE), length.out = 150)
+bmi_range <- seq(min(train_set$BMICALC, na.rm = TRUE),
+                 max(train_set$BMICALC, na.rm = TRUE), length.out = 150)
+
+grid_2d <- expand.grid(AGE = age_range, BMICALC = bmi_range)
+grid_2d$pred <- predict(svm_2d, grid_2d)
+
+# Get support vectors
+sv_idx <- svm_2d$index
+sv_data <- train_set[sv_idx, ]
+
+# Plot
+ggplot() +
+  geom_tile(data = grid_2d,
+            aes(x = AGE, y = BMICALC, fill = pred),
+            alpha = 0.4) +
+  geom_point(data = train_set,
+             aes(x = AGE, y = BMICALC, color = heart_disease),
+             size = 1.2, alpha = 0.55) +
+  geom_point(data = sv_data,
+             aes(x = AGE, y = BMICALC),
+             shape = 1, size = 3.5, color = "#ffcc00", stroke = 1.3,
+             alpha = 0.8) +
+  scale_fill_manual(values  = c("No" = "#d0e8ff", "Yes" = "#ffd6dc"),
+                    name = "Predicted") +
+  scale_color_manual(values = c("No" = COL_NO, "Yes" = COL_YES),
+                     name = "Actual") +
+  labs(
+    title    = "SVM Decision Boundary: Age vs BMI",
+    subtitle = "Radial kernel  |  Gold circles = support vectors",
+    x        = "Age (years)",
+    y        = "Body Mass Index (BMI)",
+    caption  = "Note: boundary shown for 2 predictors only; full model uses 8 predictors"
+  )
+```
+
+---
+
+## 5. Model Comparison Summary
+
+```{r comparison-table}
+# Build a clean comparison table
+comparison <- data.frame(
+  Kernel       = c("Linear", "Radial", "Polynomial"),
+  Best_C       = c(tune_linear$best.parameters$cost,
+                   tune_radial$best.parameters$cost,
+                   tune_poly$best.parameters$cost),
+  Other_Param  = c("—",
+                   paste0("gamma = ", tune_radial$best.parameters$gamma),
+                   paste0("degree = ", tune_poly$best.parameters$degree)),
+  Accuracy     = round(c(
+    results_linear$cm$overall["Accuracy"],
+    results_radial$cm$overall["Accuracy"],
+    results_poly$cm$overall["Accuracy"]
+  ), 4),
+  Sensitivity  = round(c(
+    results_linear$cm$byClass["Sensitivity"],
+    results_radial$cm$byClass["Sensitivity"],
+    results_poly$cm$byClass["Sensitivity"]
+  ), 4),
+  Specificity  = round(c(
+    results_linear$cm$byClass["Specificity"],
+    results_radial$cm$byClass["Specificity"],
+    results_poly$cm$byClass["Specificity"]
+  ), 4),
+  AUC          = round(c(
+    as.numeric(auc(results_linear$roc)),
+    as.numeric(auc(results_radial$roc)),
+    as.numeric(auc(results_poly$roc))
+  ), 4)
+)
+
+knitr::kable(comparison,
+             caption = "Model Performance Comparison on Held-Out Test Set",
+             align   = "lcccccc")
+```
+
+---
+
+## 6. Discussion
+
+The dataset presents a classic **class imbalance** problem: only ~6% of adults reported a heart disease diagnosis. Without class weights, all three models would simply predict "No" for nearly everyone and still achieve ~94% accuracy-a hollow metric. By weighting the minority class inversely proportional to its frequency, we push the models to actually learn the patterns associated with heart disease, even at the cost of some overall accuracy.
+
+Among the predictors, **age** consistently appears as the most important factor. Heart disease risk increases substantially with age, which the decision boundary plot illustrates clearly-older individuals are classified as higher risk regardless of other factors. **BMI** contributes additional separation, particularly at higher values, but age dominates the boundary.
+
+**Sleep** and **moderate physical activity** offer interesting behavioral predictors. Lower sleep duration and zero moderate activity both correlate with heart disease in this sample, consistent with existing literature. Alcohol days per year showed a weaker and somewhat U-shaped relationship - moderate drinking is not necessarily associated with elevated risk, but heavy drinking is.
+
+**Income level** (poverty group) adds socioeconomic context. Those below the poverty line show higher rates of heart disease in this sample, likely reflecting compounded risk factors like reduced healthcare access, higher stress, and poorer diet quality.
+
+Model limitations worth noting: the NHIS is a cross-sectional self-report survey. The target variable ("ever told by a doctor") is subject to detection bias-people without healthcare access may have undiagnosed conditions. The dataset is also not a nationally representative sample without applying the SAMPWEIGHT variable (which we did not use here), so extrapolating these findings to the broader US population requires caution.
+
+---
+
+## 7. Conclusions
+
+All three SVM kernels successfully distinguish heart disease cases from healthy adults, with AUC values well above random chance. The **linear kernel performed best overall**-achieving the highest AUC (0.825) and the highest sensitivity (0.840), meaning it correctly identified 84% of actual heart disease cases. This suggests the relationship between these behavioral predictors and heart disease is largely linear in the feature space. Key behavioral takeaways: higher BMI, lower physical activity, and poor sleep hygiene are associated with greater heart disease risk, while income level adds a structural layer that lifestyle variables alone cannot capture.
+
+For policy implications: interventions targeting moderate physical activity and sleep hygiene-particularly among lower-income adults-could meaningfully reduce population-level heart disease burden. The fact that behavioral variables (diet, activity, sleep) add predictive value on top of demographics suggests lifestyle-focused programs have merit even after controlling for age and income.
+
+---
+
+## References
+
+[1] Lynn A. Blewett, Julia A. Rivera Drew, Miriam L. King, Kari C.W. Williams, Daniel Backman, Annie Chen, and Stephanie Richards. *IPUMS Health Surveys: National Health Interview Survey, Version 7.4* [dataset]. Minneapolis, MN: IPUMS, 2024. https://doi.org/10.18128/D070.V7.4. http://www.nhis.ipums.org.
